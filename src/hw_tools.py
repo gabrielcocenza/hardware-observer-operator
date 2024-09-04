@@ -18,6 +18,7 @@ from typing import Dict, List, Set, Tuple
 import requests
 import urllib3
 from charms.operator_libs_linux.v0 import apt
+from charms.operator_libs_linux.v2 import snap
 from ops.model import ModelError, Resources
 
 import apt_helpers
@@ -185,6 +186,22 @@ class TPRStrategyABC(StrategyABC, metaclass=ABCMeta):
     @abstractmethod
     def remove(self) -> None:
         """Remove details."""
+
+
+class SnapStrategy(StrategyABC):
+    """Snap strategy class."""
+
+    snap_name: str
+
+    def install(self, channel: str = "latest/stable") -> None:
+        snap.add(self.snap_name, channel=channel)
+
+    def remove(self) -> None:
+        snap.remove([self.snap_name])
+
+    def check(self) -> bool:
+        snap_client = snap.SnapCache()[self.snap_name]
+        return all(service.get("active", False) for service in snap_client.services.values())
 
 
 class StorCLIStrategy(TPRStrategyABC):
@@ -411,6 +428,12 @@ class SmartCtlStrategy(APTStrategyABC):
         return check_deb_pkg_installed(self.pkg)
 
 
+class DCGMStrategy(SnapStrategy):
+    "Strategies for DCGM."
+    _name = HWTool.DCGM
+    snap_name = HWTool.DCGM.value
+
+
 class SmartCtlExporterStrategy(StrategyABC):  # pylint: disable=R0903
     """Install smartctl exporter binary."""
 
@@ -601,9 +624,15 @@ def disk_hw_verifier() -> Set[HWTool]:
     return {HWTool.SMARTCTL} if lshw(class_filter="disk") else set()
 
 
+def nvidia_gpu_verifier() -> Set[HWTool]:
+    """Verify if the hardware has NVIDIA gpu."""
+    gpus = lshw(class_filter="display")
+    return {HWTool.DCGM for gpu in gpus if "nvidia" in gpu.get("vendor", "").lower()}
+
+
 def detect_available_tools() -> Set[HWTool]:
     """Return HWTool detected after checking the hardware."""
-    return raid_hw_verifier() | bmc_hw_verifier() | disk_hw_verifier()
+    return raid_hw_verifier() | bmc_hw_verifier() | disk_hw_verifier() | nvidia_gpu_verifier()
 
 
 class HWToolHelper:
@@ -623,6 +652,7 @@ class HWToolHelper:
             IPMISENSORStrategy(),
             RedFishStrategy(),
             SmartCtlStrategy(),
+            DCGMStrategy(),
         ]
 
     def fetch_tools(  # pylint: disable=W0102
@@ -689,7 +719,7 @@ class HWToolHelper:
                     if path:
                         strategy.install(path)
                 # APTStrategy
-                elif isinstance(strategy, APTStrategyABC):
+                elif isinstance(strategy, (APTStrategyABC, SnapStrategy)):
                     strategy.install()  # pylint: disable=E1120
                 logger.info("Strategy %s install success", strategy)
             except (
